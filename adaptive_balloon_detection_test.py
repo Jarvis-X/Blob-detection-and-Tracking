@@ -79,7 +79,7 @@ sensor.__write_reg(0xb5, 64)    # reset B auto gain
 
 sensor.__write_reg(0xfe, 0)     # change to registers at page 0
                                 # manually set RGB gains to fix color/white balance
-sensor.__write_reg(0xad, 76)    # R gain ratio
+sensor.__write_reg(0xad, 64)    # R gain ratio
 sensor.__write_reg(0xae, 64)    # G gain ratio
 sensor.__write_reg(0xaf, 92)    # B gain ratio
 sensor.set_auto_exposure(True)

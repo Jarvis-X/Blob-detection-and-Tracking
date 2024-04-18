@@ -17,6 +17,145 @@ import math
 import omv
 
 
+
+class ShapeDetector:
+    def __init__(self, gridsize):
+        self.gridsize = gridsize
+        self.binary_image = sensor.alloc_extra_fb(gridsize, gridsize, sensor.BINARY)
+        # Pre-create shapes
+        self.img_triangle = self.create_triangle(gridsize)
+        self.tot_tri = sum(self.img_triangle.get_pixel(j, i) for i in range(self.gridsize) for j in range(self.gridsize))
+        self.img_circle = self.create_circle(gridsize)
+        self.tot_cir = sum(self.img_circle.get_pixel(j, i) for i in range(self.gridsize) for j in range(self.gridsize))
+        self.img_square = self.create_square(gridsize)
+        self.tot_squ = sum(self.img_square.get_pixel(j, i) for i in range(self.gridsize) for j in range(self.gridsize))
+
+    def create_triangle(self, gridsize):
+        # Allocate frame buffer for triangle
+    #        img = sensor.alloc_extra_fb(gridsize, gridsize, sensor.BINARY)
+    #        # Draw an isosceles triangle
+    #        img.draw_line(gridsize // 2, gridsize - 1, 0, 0, color=255, thickness=1)
+    #        img.draw_line(gridsize // 2, gridsize - 1, gridsize - 1, 0, color=255, thickness=1)
+    #        img.draw_line(0, 0, gridsize - 1, 0, color=255, thickness=2)
+        img = sensor.alloc_extra_fb(gridsize, gridsize, sensor.BINARY)
+        # Flipped isosceles triangle
+        img.draw_line(gridsize // 2, 0, 0, gridsize - 1, color=255, thickness=1)  # Apex to left base
+        img.draw_line(gridsize // 2, 0, gridsize - 1, gridsize - 1, color=255, thickness=1)  # Apex to right base
+        img.draw_line(0, gridsize - 1, gridsize - 1, gridsize - 1, color=255, thickness=2)  # Base line
+
+        return img
+
+
+    def create_circle(self, gridsize):
+        # Allocate frame buffer for circle
+        img = sensor.alloc_extra_fb(gridsize, gridsize, sensor.BINARY)
+        radius = (gridsize)// 2
+        img.draw_circle(gridsize // 2, gridsize // 2, radius, color=255, fill=False, thickness=2)
+        if (gridsize % 2 == 0):
+            img.draw_circle((gridsize) // 2 -1, (gridsize) // 2 -1, radius, color=255, fill=False)
+            img.draw_circle((gridsize) // 2 , (gridsize) // 2 -1, radius, color=255, fill=False)
+            img.draw_circle((gridsize) // 2 -1, (gridsize) // 2 , radius, color=255, fill=False)
+        return img
+
+    def create_square(self, gridsize):
+        # Allocate frame buffer for square
+        img = sensor.alloc_extra_fb(gridsize, gridsize, sensor.BINARY)
+        # Draw a square
+        img.draw_rectangle(0, 0, gridsize, gridsize, color=255, fill=False, thickness=1)
+        return img
+
+    def downsample_and_average(self, roi_img):
+        # Custom function to process and downsample the ROI
+        # Use the mean_pooled function to simplify the pooling
+        src_width, src_height = roi_img.width(), roi_img.height()
+        block_width = src_width // self.gridsize
+        block_height = src_height // self.gridsize
+        width_remainder = src_width % self.gridsize
+        height_remainder = src_height % self.gridsize
+#        if (block_width == 0 or block_height ==0):
+#            return self.binary_image
+
+        # Iterate over each block
+        for i in range(self.gridsize):
+            for j in range(self.gridsize):
+                current_block_width = block_width + (1 if j < width_remainder else 0)
+                current_block_height = block_height + (1 if i < height_remainder else 0)
+                x = sum(block_width + (1 if m < width_remainder else 0) for m in range(j))
+                y = sum(block_height + (1 if n < height_remainder else 0) for n in range(i))
+
+                # Define the sub ROI for this block
+                sub_roi = (x, y, current_block_width, current_block_height)
+                # Get statistics for the sub ROI
+                stats = roi_img.get_statistics(roi=sub_roi)
+                # Calculate the mean and determine if the block is predominantly white or black
+                mean_val = stats.mean()
+                binary_val = 1 if mean_val > 60 else 0  # Threshold the mean to create a binary image
+                self.binary_image.set_pixel(j, i, binary_val)
+
+        return self.binary_image
+
+    def detect_shape(self, roi_img):
+        mean_pooled_img = self.downsample_and_average(roi_img.to_grayscale())
+
+        center_size = 3 if self.gridsize > 3 else 1  # Only 3x3 or 1x1, adjust if needed
+        start = (self.gridsize - center_size) // 2
+        end = start + center_size
+        center_sum = sum(mean_pooled_img.get_pixel(j, i) for i in range(start, end) for j in range(start, end))
+        if (center_sum >= center_size**2 * .66):
+            return "not"
+        # Prepare for shape comparison
+        overlap_triangle = 0
+        overlap_circle = 0
+        overlap_square = 0
+
+        # Calculate overlaps by comparing each pixel
+        for i in range(self.gridsize):
+            for j in range(self.gridsize):
+                if mean_pooled_img.get_pixel(j, i) == 1:  # Check if the ROI pixel is white
+                    if self.img_triangle.get_pixel(j, i) == 1:
+                        overlap_triangle += 1
+                    if self.img_circle.get_pixel(j, i) == 1:
+                        overlap_circle += 1
+                    if self.img_square.get_pixel(j, i) == 1:
+                        overlap_square += 1
+
+#        print("Overlap Triangle:", overlap_triangle, "Overlap Circle:", overlap_circle, "Overlap Square:", overlap_square)
+
+        # Identify which shape it is based on maximum overlap
+        if overlap_triangle > overlap_circle and overlap_triangle > overlap_square:
+            return "triangle"
+        elif overlap_square > overlap_circle:
+            return "square"
+        else:
+            return "circle"
+
+    def extract_valid_roi(self, img, blob, current_thresholds, min_edge_distance=0):
+        """ Extracts and validates the ROI from the given blob based on minimum distance to the edge """
+        left_distance = blob.x()
+        right_distance = img.width() - (blob.x() + blob.w())
+        top_distance = blob.y()
+        bottom_distance = img.height() - (blob.y() + blob.h())
+        min_distance = min(left_distance, right_distance, top_distance, bottom_distance)
+
+        if min_distance >= min_edge_distance:
+            roi_width = min(int(img.width() * 1), blob.w())
+            roi_height = min(int(img.height() * 1), blob.h())
+            if roi_width // self.gridsize > 0 and roi_height // self.gridsize > 0:
+                roi = (max(0, blob.x()), max(0, blob.y()), roi_width, roi_height)
+                x_scale = 1
+                y_scale = 1
+                if roi_width > img.width()/2:
+                    x_scale = .5
+                if roi_height > img.height()/2:
+                    y_scale = .5
+                roi_img = img.copy(x_scale = x_scale, y_scale = y_scale, roi=roi).binary(current_thresholds)
+                return roi_img, roi
+
+        return None, None  # Return None if no valid ROI found
+
+
+
+
 class Tracker:
     def __init__(
         self,
@@ -367,16 +506,20 @@ class GoalTracker(Tracker):
             dynamic_threshold,
             threshold_update_rate,
         )
+        self.shape_detector = ShapeDetector(gridsize=9)
+        self.LED_STATE = False
         self.time_last_snapshot = time.time_ns()  # wait for the sensor to capture a new image
         self.extra_fb = sensor.alloc_extra_fb(sensor.width(), sensor.height(), sensor.RGB565)
         self.extra_fb2 = sensor.alloc_extra_fb(sensor.width(), sensor.height(), sensor.RGB565)
         self.extra_fb3 = sensor.alloc_extra_fb(sensor.width(), sensor.height(), sensor.RGB565)
-        self.roi = MemROI(ffp=0.01, ffs=0.025, gfp=0.5, gfs=0.5)  # The ROI of the blob
         self.IR_LED = Pin(LEDpin, Pin.OUT)
         self.IR_LED.value(0)
-        self.sensor_sleep_time = sensor_sleep_time
+        self.roi = MemROI(ffp=0.08, ffs=0.04, gfp=1, gfs=0.8)  # The ROI of the blob
+        self.tracked_blob = None
         blob, _ = self.find_reference()
         self.tracked_blob = CurBLOB(blob)
+
+        self.sensor_sleep_time = sensor_sleep_time
 
     def track(self, edge_removal: bool = True) -> tuple:
         """
@@ -506,14 +649,22 @@ class GoalTracker(Tracker):
         # Get an extra frame buffer and take a snapshot
         self.clock.tick()
         ##################################################################
-        LED_STATE = False
+#        self.LED_STATE = True
+        if self.tracked_blob is not None:
+            if self.tracked_blob.untracked_frames > 1:
+                self.LED_STATE = not self.LED_STATE
+            elif self.tracked_blob.blob_history is None:
+                self.LED_STATE = not self.LED_STATE
+
+        else:
+            self.LED_STATE = not self.LED_STATE
 #        print("no")
 #        self.sensor_sleep(self.time_last_snapshot)
-        self.IR_LED.value(not LED_STATE)
-        sensor.skip_frames(2)
+        self.IR_LED.value(not self.LED_STATE)
+        sensor.skip_frames(1)
         while(not sensor.get_frame_available()):
             pass
-#            time.sleep_us(1)
+#        time.sleep_us(20)
 
 #        self.time_last_snapshot = time.time_ns()   # wait for the sensor to capture a new image
 
@@ -522,23 +673,27 @@ class GoalTracker(Tracker):
         self.time_last_snapshot = time.time_ns() # wait for the sensor to capture a new image
         ###################################################################
 
-        self.IR_LED.value(LED_STATE)
+        self.IR_LED.value(self.LED_STATE)
 #        self.sensor_sleep(self.time_last_snapshot)
+#        sensor.skip_frames(1)
 
         while(not sensor.get_frame_available()):
             pass
+#        time.sleep_us(20)
 #            time.sleep_us(1)
 #        time.sleep_us(int(self.sensor_sleep_time/2))
 
 
-        self.IR_LED.value(not LED_STATE)
+        self.IR_LED.value(not self.LED_STATE)
         self.extra_fb2.replace(sensor.snapshot())
         self.time_last_snapshot = time.time_ns()  # wait for the sensor to capture a new image
         ######################################################################
 #        self.sensor_sleep(self.time_last_snapshot)
 
+#        sensor.skip_frames(1)
         while(not sensor.get_frame_available()):
             pass
+#        time.sleep_us(20)
 #            time.sleep_us(1)
 
         img = sensor.snapshot()
@@ -546,17 +701,28 @@ class GoalTracker(Tracker):
 
         #IR_LED.value(not LED_STATE)
 
-
+        #original
         self.IR_LED.value(False)
-        img.sub(self.extra_fb2, reverse=LED_STATE)
+        img.sub(self.extra_fb2, reverse=self.LED_STATE)
         self.extra_fb3.replace(img)
         img.replace(self.extra_fb)
-        img.sub(self.extra_fb2, reverse=LED_STATE)
+        img.sub(self.extra_fb2, reverse=self.LED_STATE)
         img.difference(self.extra_fb3)
         self.extra_fb2.replace(img)
         img.replace(self.extra_fb3)
-        img.sub(self.extra_fb2, reverse=LED_STATE)
+        img.sub(self.extra_fb2, reverse=self.LED_STATE)
 
+
+
+#        self.IR_LED.value(False)
+#        img.sub(self.extra_fb2, reverse=self.LED_STATE)
+#        self.extra_fb3.replace(img)
+#        img.replace(self.extra_fb)
+#        img.sub(self.extra_fb2, reverse=self.LED_STATE)
+#        img.difference(self.extra_fb3)
+#        self.extra_fb2.replace(img)
+#        img.replace(self.extra_fb3)
+#        img.sub(self.extra_fb2, reverse=self.LED_STATE)
         # Remove the edge noises
 
 
@@ -571,21 +737,54 @@ class GoalTracker(Tracker):
             merge=True,
 
         )
+#        largest_blob = max(list_of_blob, key=lambda b: b.area(), default=None)
 
+        #shape detection/determination
+#        if largest_blob:
+#            roi_img, roi = self.shape_detector.extract_valid_roi(img, largest_blob, self.current_thresholds)
+#            if roi_img:
+#                detected_shape = self.shape_detector.detect_shape(roi_img)
+#                print("Detected Shape:", detected_shape)
+
+
+##                mean_pooled_img = self.shape_detector.downsample_and_average(roi_img)
+##                gridsize = 9
+##    #             Visually represent the data (example code)
+##                scale_x = roi[2] / gridsize
+##                scale_y = roi[3] / gridsize
+##                for i in range(gridsize):
+##                    for j in range(gridsize):
+##                        gray_value = mean_pooled_img.get_pixel(j, i) *255
+##                        rect_x = roi[0] + j * int(scale_x)
+##                        rect_y = roi[1] + i * int(scale_y)
+##                        rect_width = max(int(scale_x), 1)
+##                        rect_height = max(int(scale_y), 1)
+##                        img.draw_rectangle(rect_x, rect_y, rect_width, rect_height, color=(gray_value, gray_value, gray_value), fill=True)
+#                img.draw_rectangle(largest_blob.rect(), color=(127, 0, 127))  # Highlight the blob
+#                img.draw_string(largest_blob.x(), largest_blob.y(), detected_shape, color=(255, 0, 255))
         st = "FPS: {}".format(str(round(self.clock.fps(), 2)))
         img.draw_string(0, 0, st, color=(255, 0, 0))
         # sensor.dealloc_extra_fb()
         omv.disable_fb(False)
         big_blobs=[]
         for blob in list_of_blob:
-            if blob.area() > 100 and line_length(blob.minor_axis_line())> 15:
-                big_blobs.append(blob)
-            img.draw_edges(blob.min_corners(), color=(255, 0, 0))
-            img.draw_line(blob.major_axis_line(), color=(0, 255, 0))
-            img.draw_line(blob.minor_axis_line(), color=(0, 0, 255))
-            img.draw_rectangle(blob.rect())
-            img.draw_cross(blob.cx(), blob.cy())
-            img.draw_keypoints([(blob.cx(), blob.cy(), int(math.degrees(blob.rotation())))], size=20)
+            if blob.area() > 20 and line_length(blob.minor_axis_line())> 5:
+                roi_img, roi = self.shape_detector.extract_valid_roi(img, blob, self.current_thresholds)
+                if roi_img:
+                    detected_shape = self.shape_detector.detect_shape(roi_img)
+                    if detected_shape != "triangle" and detected_shape != "not":
+                        big_blobs.append(blob)
+                    img.draw_string(blob.x(), blob.y(), detected_shape[0], color=(255, 0, 255))
+#                else: # if shape cannot be determined add blob to anyway
+#                    big_blobs.append(blob)
+#                    img.draw_rectangle(blob.rect(), color=(255, 0, 0))  # Red rectangle around the blob for visibility
+#            img.draw_edges(blob.min_corners(), color=(255, 0, 0))
+#            img.draw_line(blob.major_axis_line(), color=(0, 255, 0))
+#            img.draw_line(blob.minor_axis_line(), color=(0, 0, 255))
+#            img.draw_rectangle(blob.rect())
+#            img.draw_cross(blob.cx(), blob.cy())
+#            img.draw_keypoints([(blob.cx(), blob.cy(), int(math.degrees(blob.rotation())))], size=20)
+
 
         return img, big_blobs
 
